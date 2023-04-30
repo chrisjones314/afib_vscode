@@ -131,9 +131,15 @@ function createAfibOutputChanel(): vscode.OutputChannel {
 }
 
 function validateIsIdDocument(document: vscode.TextDocument): boolean {
+	var fileName = document.fileName;
+	if(!fileName.endsWith("_id.dart")) {
+		return false;
+	}
+
 	var lineNumber = 0;
 	var regexStartClass = RegExp('class\\s+.*ID\\s+extends\\s+.*ID');
 	var lineCount = document.lineCount;
+	
 	while(lineNumber < lineCount) {
 		var line = document.lineAt(lineNumber++);
 		var lineText = line.text;
@@ -204,6 +210,151 @@ function createIdSyncEdit(document: vscode.TextDocument, lineNumber: number, out
 	return vscode.TextEdit.replace(decl.range, revised);
 }
 
+function syncIdentifiers() {
+	
+	const editor = vscode.window.activeTextEditor;
+	if (!editor) {
+		vscode.window.showErrorMessage("Afib: You must run this command with an AFib id file open.");
+		return;
+	}
+
+	const document = editor.document;
+	const output = createAfibOutputChanel();
+	output.appendLine(`Syncronizing ${document.uri}`);
+
+	if(!validateIsIdDocument(document)) {
+		vscode.window.showErrorMessage("Afib: Could not find AFib-style id declarations in this file.");
+		return;			
+	}
+
+	const textEdits: vscode.TextEdit[] = [];
+	output.appendLine("Starting sync");
+
+	// now, go through each line in the document, and replace the line 
+	for(var i = 0; i < document.lineCount; i++) {
+		const edit = createIdSyncEdit(document, i, output);
+		if(edit !== null) {
+			textEdits.push(edit);
+		}
+	}
+
+	if(textEdits.length === 0) {
+		output.appendLine("No changes were necessary.");
+		return;
+	}
+
+	output.appendLine(`Applying ${textEdits.length} changes.`);
+	const workEdits = new vscode.WorkspaceEdit();		
+	workEdits.set(document.uri, textEdits); // give the edits
+	vscode.workspace.applyEdit(workEdits); 		
+}
+
+function addIdentifier() {
+	const editor = vscode.window.activeTextEditor;
+
+	if (!editor) {
+		vscode.window.showErrorMessage("Afib: You must run this command from within an active editor.");
+		return;
+	}
+	const document = editor.document;
+	const selection = editor.selection;
+	const activeLine = selection.active.line;
+	const selectedLine = document.lineAt(activeLine).text;
+	if(selectedLine.length <= 0) {
+		vscode.window.showErrorMessage("Afib: You must place the cursor within a static ID reference (e.g. XXWidgetID.myWidgetId)");
+		return;
+	}
+
+
+	
+	console.log(`Got the selected text ${selectedLine}`);
+	const staticIdentifier = extractIdentifierFromLine(selectedLine, selection.active.character);
+	const notStaticIdentifierError = "AFib: The cursor must be within a static reference to an AFib identifer, like 'WidgetID.myNewWidget'";
+	if(staticIdentifier === null || staticIdentifier.indexOf(".") < 0) {
+		vscode.window.showErrorMessage(notStaticIdentifierError);
+		return;
+	}
+
+	// split the full identifer into the class and the idenfifer
+	console.log(`Got the selected identifier ${staticIdentifier}`);
+	const splitIdentifier = staticIdentifier.split(".");
+	if(splitIdentifier.length !== 2) {
+		vscode.window.showErrorMessage(notStaticIdentifierError);
+		return;
+	}
+	const classIdentifier = splitIdentifier[0];
+	const nameIdentifier = splitIdentifier[1];
+	const camelIdentifier = nameIdentifier;
+	const afibPackagePrefix = inferPackagePrefixFor(classIdentifier);
+	if(afibPackagePrefix === null || afibPackagePrefix.length === 0) {
+		vscode.window.showErrorMessage(`AFib: Could not infer the package prefix from class ${classIdentifier}`);
+	}
+
+	const afibClassRoot = inferClassRootFor(afibPackagePrefix, classIdentifier);
+	if(afibClassRoot === null) {
+		vscode.window.showErrorMessage(`AFib: Could not infer an AFib identifier type from class ${classIdentifier}`);
+		return;
+	}
+
+	const afibClassEnd = afibClassRoot.length === 0 ? "" : ")";
+	const uriIdFile = createIdUriFromSourcePath(afibPackagePrefix, document.fileName);
+	
+	vscode.workspace.openTextDocument(uriIdFile).then( (idDoc) => {
+		console.log(`Opened document ${idDoc.fileName}`);
+		const firstLine = findStartOfIdClass(idDoc, classIdentifier);
+		if(firstLine < 0) {
+			vscode.window.showErrorMessage(`AFib: Could not find the class ${classIdentifier} in file ${uriIdFile}`);
+			return;
+		}
+
+		const insertLine = findInsertLineForIdClass(idDoc, firstLine);
+		if(insertLine < 0) {
+			vscode.window.showErrorMessage(`AFib: Could not find an '{' starting on line ${firstLine}`);
+			return;
+		}
+
+		console.log(`${classIdentifier} starts on line ${firstLine}, will insert on ${insertLine}`);
+
+		const insertPos = new vscode.Position(insertLine, 0);
+		const isStringValue = inferIsStringValue(idDoc, firstLine);
+		const idDecl = createIdDeclaration(nameIdentifier, isStringValue, `${afibPackagePrefix.toUpperCase()}${afibClassRoot}`);
+		var insertText = `  ${idDecl}\n`;
+		const textEdits: vscode.TextEdit[] = [];
+		textEdits.push(vscode.TextEdit.insert(
+			insertPos,
+			insertText
+		));
+
+		const workEdits = new vscode.WorkspaceEdit();
+		
+		workEdits.set(uriIdFile, textEdits); // give the edits
+		vscode.workspace.applyEdit(workEdits); 		
+
+		vscode.env.clipboard.writeText(staticIdentifier);
+
+	
+		vscode.window.showInformationMessage(
+			`Afib: Created identifier ${staticIdentifier} in ${afibPackagePrefix}_id.dart`,
+			{ modal: false }
+		);
+	});
+}
+
+function fixupIdentifiers() {
+	const editor = vscode.window.activeTextEditor;
+	if (!editor) {
+		vscode.window.showErrorMessage("Afib: You must run this command from within an active editor.");
+		return;
+	}
+	const document = editor.document;
+
+	if(validateIsIdDocument(document)) {
+		syncIdentifiers();
+	} else {
+		addIdentifier();
+	}
+}
+
 // this method is called when your extension is activated
 // your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
@@ -212,156 +363,11 @@ export function activate(context: vscode.ExtensionContext) {
 	// This line of code will only be executed once when your extension is activated
 	console.log('Your extension "afib-project-helper" is now active!');
 
-	let disposableSync = vscode.commands.registerCommand('afib-project-helper.sync-identifiers', () => {
-
-		const editor = vscode.window.activeTextEditor;
-		if (!editor) {
-			vscode.window.showErrorMessage("Afib: You must run this command with an AFib id file open.");
-			return;
-		}
-
-		const document = editor.document;
-		const output = createAfibOutputChanel();
-		output.appendLine(`Syncronizing ${document.uri}`);
-
-		if(!validateIsIdDocument(document)) {
-			vscode.window.showErrorMessage("Afib: Could not find AFib-style id declarations in this file.");
-			return;			
-		}
-
-		const textEdits: vscode.TextEdit[] = [];
-		output.appendLine("Starting sync");
-
-		// now, go through each line in the document, and replace the line 
-		for(var i = 0; i < document.lineCount; i++) {
-			const edit = createIdSyncEdit(document, i, output);
-			if(edit !== null) {
-				textEdits.push(edit);
-			}
-		}
-
-		if(textEdits.length === 0) {
-			output.appendLine("No changes were necessary.");
-			return;
-		}
-
-		output.appendLine(`Applying ${textEdits.length} changes.`);
-		const workEdits = new vscode.WorkspaceEdit();		
-		workEdits.set(document.uri, textEdits); // give the edits
-		vscode.workspace.applyEdit(workEdits); 		
-
+	let disposableFixup = vscode.commands.registerCommand('afib-project-helper.fixup-identifiers', () => {
+		fixupIdentifiers();
 	});
 
-	let disposableAdd = vscode.commands.registerCommand('afib-project-helper.add-identifier', () => {
-
-		const editor = vscode.window.activeTextEditor;
-
-		if (!editor) {
-			vscode.window.showErrorMessage("Afib: You must run this command from within an active editor.");
-			return;
-		}
-		const document = editor.document;
-		const selection = editor.selection;
-		const activeLine = selection.active.line;
-		const selectedLine = document.lineAt(activeLine).text;
-		if(selectedLine.length <= 0) {
-			vscode.window.showErrorMessage("Afib: You must place the cursor within a static ID reference (e.g. XXWidgetID.myWidgetId)");
-			return;
-		}
-
-		console.log(`Got the selected text ${selectedLine}`);
-		const staticIdentifier = extractIdentifierFromLine(selectedLine, selection.active.character);
-		const notStaticIdentifierError = "AFib: The cursor must be within a static reference to an AFib identifer, like 'WidgetID.myNewWidget'";
-		if(staticIdentifier === null || staticIdentifier.indexOf(".") < 0) {
-			vscode.window.showErrorMessage(notStaticIdentifierError);
-			return;
-		}
-
-		// split the full identifer into the class and the idenfifer
-		console.log(`Got the selected identifier ${staticIdentifier}`);
-		const splitIdentifier = staticIdentifier.split(".");
-		if(splitIdentifier.length !== 2) {
-			vscode.window.showErrorMessage(notStaticIdentifierError);
-			return;
-		}
-		const classIdentifier = splitIdentifier[0];
-		const nameIdentifier = splitIdentifier[1];
-		const camelIdentifier = nameIdentifier;
-		const afibPackagePrefix = inferPackagePrefixFor(classIdentifier);
-		if(afibPackagePrefix === null || afibPackagePrefix.length === 0) {
-			vscode.window.showErrorMessage(`AFib: Could not infer the package prefix from class ${classIdentifier}`);
-		}
-
-		const afibClassRoot = inferClassRootFor(afibPackagePrefix, classIdentifier);
-		if(afibClassRoot === null) {
-			vscode.window.showErrorMessage(`AFib: Could not infer an AFib identifier type from class ${classIdentifier}`);
-			return;
-		}
-
-		const afibClassEnd = afibClassRoot.length === 0 ? "" : ")";
-		const uriIdFile = createIdUriFromSourcePath(afibPackagePrefix, document.fileName);
-		
-		vscode.workspace.openTextDocument(uriIdFile).then( (idDoc) => {
-			console.log(`Opened document ${idDoc.fileName}`);
-			const firstLine = findStartOfIdClass(idDoc, classIdentifier);
-			if(firstLine < 0) {
-				vscode.window.showErrorMessage(`AFib: Could not find the class ${classIdentifier} in file ${uriIdFile}`);
-				return;
-			}
-
-			const insertLine = findInsertLineForIdClass(idDoc, firstLine);
-			if(insertLine < 0) {
-				vscode.window.showErrorMessage(`AFib: Could not find an '{' starting on line ${firstLine}`);
-				return;
-			}
-
-			console.log(`${classIdentifier} starts on line ${firstLine}, will insert on ${insertLine}`);
-
-			const insertPos = new vscode.Position(insertLine, 0);
-			const isStringValue = inferIsStringValue(idDoc, firstLine);
-			const idDecl = createIdDeclaration(nameIdentifier, isStringValue, `${afibPackagePrefix.toUpperCase()}${afibClassRoot}`);
-			var insertText = `  ${idDecl}\n`;
-			const textEdits: vscode.TextEdit[] = [];
-			textEdits.push(vscode.TextEdit.insert(
-				insertPos,
-				insertText
-			));
-
-			const workEdits = new vscode.WorkspaceEdit();
-			
-			workEdits.set(uriIdFile, textEdits); // give the edits
-			vscode.workspace.applyEdit(workEdits); 		
-
-			vscode.env.clipboard.writeText(staticIdentifier);
-
-			const output = createAfibOutputChanel();
-			output.appendLine(`Afib: Created identifier ${staticIdentifier} in ${afibPackagePrefix}_id.dart`);
-		});
-	
-
-
-
-		
-		/*
- 		const textEdits: vscode.TextEdit[] = [];
-		textEdits.push(vscode.TextEdit.insert(
-			new vscode.Position(0,0),
-			`// Inserted text by afib: ${selectedText}`
-		));
-		
-		
-
-		const workEdits = new vscode.WorkspaceEdit();
-		workEdits.set(uriIdFile, textEdits); // give the edits
-		vscode.workspace.applyEdit(workEdits); 		
-		
-		vscode.window.showInformationMessage('Added ID for AFib');
-		*/
-
-	});
-
-	context.subscriptions.push(disposableAdd);
-	context.subscriptions.push(disposableSync);
+	context.subscriptions.push(disposableFixup);
 }
 
 // this method is called when your extension is deactivated

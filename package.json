@@ -10,36 +10,23 @@
 		"Other"
 	],
 	"activationEvents": [
-		"onCommand:afib-project-helper.add-identifier",
-		"onCommand:afib-project-helper.sync-identifiers"
-
+		"onCommand:afib-project-helper.fixup-identifiers"
 	],
 	"main": "./out/extension.js",
 	"contributes": {
 		"commands": [
 			{
-				"command": "afib-project-helper.add-identifier",
-				"title": "Add AFib Identifier"
-			},
-			{
-				"command": "afib-project-helper.sync-identifiers",
-				"title": "Synchronize AFib Identifiers"
+				"command": "afib-project-helper.fixup-identifiers",
+				"title": "AFib Fixup Identifier(s)"
 			}
-
 		],
 		"menus": {
 			"editor/context": [
 				{
 					"when": "resourceLangId == dart",
-					"command": "afib-project-helper.add-identifier",
-					"group": "afib@1"
-				},
-				{
-					"when": "resourceLangId == dart",
-					"command": "afib-project-helper.sync-identifiers",
+					"command": "afib-project-helper.fixup-identifiers",
 					"group": "afib@1"
 				}
-
 			]
 		}
 	},
